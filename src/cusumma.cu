@@ -2,6 +2,8 @@
 #include <cublas.h>
 #include <math.h>
 #include <stdio.h>
+#include <time.h>
+#include <sys/time.h>
 
 extern "C" void
 cusumma(unsigned int transA, 
@@ -13,11 +15,11 @@ cusumma(unsigned int transA,
         float *B, 
         float *C)
 {
-  float *hA, *hB, *hC, *dA, *dB, *dC;
-  float m_opt, k_opt;
-  int i, j, diff, offset, _kmax, _m, _k, tm, tk;
+  float *hA, *dA, *dB, *dC;
+  int i, j, diff, tm, tk, tp, tp_last, tmp1, tmp2;
   char opA, opB;
-  unsigned int gpu_mem;
+  float factor;
+  unsigned int gpu_mem, _m, _mmax, _moff, _k, _kmax, _koff;
 
   cublasInit();
 
@@ -31,155 +33,164 @@ cusumma(unsigned int transA,
   // convert gpu_mem from bytes into matrix elements (floats) for simplicity
   gpu_mem /= sizeof(float);
 
-/*
-  // determine optimal partition configuration
-  // assume C is whole
-  tw    = ceil((m*k + k*n)/(1.0*s - m*n));
-  // assume C is partitioned
-  m_opt = (sqrt(4.0*m*k*gpu_mem + (k+m)*(k+m)*n*n) - (k+m)*n)/(2.0*k);
-  k_opt = (1.0*k/m) * m_opt;
-  _m    = floor(m_opt);
-  _k    = floor(k_opt);
-  tk    = ceil(1.0*k/_k);
-  tm    = ceil(1.0*m/_m);
-  tp    = tk + tk*tm + tm;
+  // determine optimal partition dimensions
+  tp = 100000;
+  tm = 0;
+  do {
+    if(tp > 0)
+      tp_last = tp;
+    _mmax = ceil(1.0*m/++tm);
+    tmp1 = A == B ? gpu_mem - _mmax * _mmax : gpu_mem - n * _mmax;
+    tmp2 = A == B ? _mmax : n + _mmax;
+    _kmax = tmp1 / tmp2; //(gpu_mem - n * _mmax)/(n + _mmax);
+    tk    = ceil(1.0*k/_kmax);
+    tp    = (A == A ? 1 : 2)*tm*tk + tm;
+  } while(tp < 0 || tp < tp_last);
 
-  plan  = (tw > 0 && tw < tp) ? SINGLE_PARTITION : DOUBLE_PARTITION;
-*/
+  _mmax = ceil(1.0*m/--tm);
+  if(A == B) {
+    _kmax = gpu_mem / _mmax - _mmax;
+  } else {
+    _kmax = ( gpu_mem - _mmax * n ) / ( _mmax + n );
+  }
+ 
+//_mmax = 2;
+//_kmax = 2;
 
   // assumes input matrices are in row-major order
-  opA = transA ? 'n' : 't';
-  opB = transB ? 'n' : 't';
+  opA = transB ? 't' : 'n';
+  opB = transA ? 't' : 'n';
 
-  // op(A) * op(A)
-  if(A == B) { 
-    // allocate and initialize result matrix, substract from total free memory
-    cublasAlloc(m * n, sizeof(float), (void**)&dC);
-    cublasSetVector(m * n, sizeof(float), C, 1, dC, 1); 
-    gpu_mem -= m * n;
+  _m    = _mmax;
+  _moff = 0;
+  while(_moff < m) {
+    cublasAlloc(_m * n, sizeof(float), (void**)&dC);
+    if(A == B) {  // op(A) * op(A)
 
-    diff = gpu_mem - m*k;
-    // A can fit entirely on the device
-    if(diff > 0) {
-      cublasAlloc(m * k, sizeof(float), (void**)&dA);
-      cublasSetVector(m * k, sizeof(float), A, 1, dA, 1);
+      diff = gpu_mem - m*k - m*m;
+      // A can fit entirely on the device
+      if((_m == m) && (diff > 0)) {
+        cublasAlloc(m * k, sizeof(float), (void**)&dA);
+        cublasSetVector(m * k, sizeof(float), A, 1, dA, 1);
         
-      cublasSgemm(opA, opB, m, n, k, 1.0f, dA, k, dA, k, 0.0f, dC, m);
-      cublasFree(dA);
-
-    } else {
-      // tk: assume cols for now, if transA, will have to flip
-      _kmax  = gpu_mem / m;
-
-      offset = 0;
-      _k     = _kmax;
-      while(offset < k) {
-        hA = (float*)malloc(m * _k * sizeof(float));
-        cublasAlloc(m * _k, sizeof(float), (void**)&dA);
-
-        for(i = 0; i < m; ++i)
-          for(j = 0; j < _k; ++j)
-            hA[i * _k + j] = A[i * k + j + offset];
-        cublasSetVector(m * _k, sizeof(float), hA, 1, dA, 1);
-        free(hA);
-
-        cublasSgemm(opA, opB, m, n, _k, 1.0f, dA, _k, dA, _k, 1.0f, dC, m);
+        cublasSgemm(opA, opB, m, m, k, 1.0f, dA, k, dA, k, 0.0f, dC, m);
         cublasFree(dA);
+
+      } else {
+        _koff  = 0;
+        _k     = _kmax;
+        factor = 0.0f;
+        while(_koff < k) {
+          cublasAlloc(_m * _k, sizeof(float), (void**)&dA);
+
+          hA = (float*)malloc(_m * _k * sizeof(float));
+          for(i = 0; i < _m; ++i)
+            for(j = 0; j < _k; ++j)
+              hA[i*_k + j] = A[(i+_moff)*k + j + _koff];
+          cublasSetVector(_m * _k, sizeof(float), hA, 1, dA, 1);
+          free(hA);
+
+          cublasSgemm(opA, opB, _m, _m, _k, 1.0f, dA, _k, dA, _k, factor, dC, _m);
+          cublasFree(dA);
         
-        offset += _k;
-        _k      = k - offset > _kmax ? _kmax : k - offset;
+          _koff += _k;
+          _k     = k - _koff > _kmax ? _kmax : k - _koff;
+          factor = 1.0f;
+        }
       }
-    }
-  } 
-  // op(A) * op(B)
-  else {
-    cublasAlloc(m * n, sizeof(float), (void**)&dC);
-    cublasSetVector(m * n, sizeof(float), C, 1, dC, 1); 
-    gpu_mem -= m * n;
 
-    diff = gpu_mem - (m*k + k*n);
-    if(diff > 0) {
+    } else { // op(A) * op(B)
+      cublasAlloc(_m * n, sizeof(float), (void**)&dC);
+      diff = gpu_mem - (m*k + k*n + m*n);
+      if((_m == m) && (diff > 0)) {
+        cublasAlloc(m * k, sizeof(float), (void**)&dA);
+        cublasSetVector(m * k, sizeof(float), A, 1, dA, 1);
 
-      cublasAlloc(m * k, sizeof(float), (void**)&dA);
-      cublasSetVector(m * k, sizeof(float), A, 1, dA, 1);
-
-      cublasAlloc(k * n, sizeof(float), (void**)&dB);
-      cublasSetVector(k * n, sizeof(float), B, 1, dB, 1);
+        cublasAlloc(k * n, sizeof(float), (void**)&dB);
+        cublasSetVector(k * n, sizeof(float), B, 1, dB, 1);
     
-      cublasSgemm(opA, opB, m, n, k, 1.0f, dA, k, dB, k, 0.0f, dC, m);
+        cublasSgemm(opA, opB, n, m, k, 1.0f, dB, n, dA, k, 0.0f, dC, m);
 
-      cublasFree(dA);
-      cublasFree(dB);
-
-    } else {
-
-      // tk: handle transpose, currently assumes A * B'
-      _kmax   = gpu_mem / (m + n);
-      _k      = _kmax;
-      offset  = 0;
-
-      while(offset < k) {
-        hA = (float*) malloc(m * _k * sizeof(float));
-        cublasAlloc(m * _k, sizeof(float), (void**)&dA);
-        hB = (float*) malloc(_k * n * sizeof(float));
-        cublasAlloc(_k * n, sizeof(float), (void**)&dB);
- 
-
-        for(i = 0; i < m; ++i)
-          for(j = 0; j < _k; ++j)
-            hA[i*_k + j] = A[i*k + j + offset];
-        cublasSetVector(m * _k, sizeof(float), hA, 1, dA, 1);
-        free(hA);
-
-        for(i = 0; i < n; ++i)
-          for(j = 0; j < _k; ++j)
-            hB[i*_k + j] = B[i*n + j + offset];
-        cublasSetVector(_k * n, sizeof(float), hB, 1, dB, 1);
-        free(hB);
-
-        cublasSgemm(opA, opB, m, n, _k, 1.0f, dA, _k, dB, _k, 1.0f, dC, m);
         cublasFree(dA);
         cublasFree(dB);
-        
-        offset += _k;
-        _k = k - offset > _kmax ? _kmax : k - offset;
+
+      } else {
+        _koff  = 0;
+        _k     = _kmax;
+        factor = 0.0f;
+        while(_koff < k) {
+          cublasAlloc(_m * _k, sizeof(float), (void**)&dA);
+          cublasAlloc(_k * n, sizeof(float), (void**)&dB);
+
+          hA = (float*) malloc(_m * _k * sizeof(float));
+          for(i = 0; i < _m; ++i)
+            for(j = 0; j < _k; ++j)
+              hA[i*_k + j] = A[(i+_moff)*k + j + _koff];
+          cublasSetVector(_m * _k, sizeof(float), hA, 1, dA, 1);
+          free(hA);
+/*
+        //hB = (float*) malloc(_k * n * sizeof(float));
+        for(i = 0; i < _k; ++i)
+          for(j = 0; j < n; ++j)
+            hB[i*n + j] = B[(i+_koff)*n + j];
+        //cublasSetMatrix(_k, n, sizeof(float), hB, _k, dB, _k);
+        cublasSetVector(_k * n, sizeof(float), hB, 1, dB, 1);
+        free(hB);
+*/
+          int ldb = transB ? _k : n;
+          cublasSetVector(_k * n, sizeof(float), B+(n*_koff), 1, dB, 1);
+          cublasSgemm(opA, opB, n, _m, _k, 1.0f, dB, ldb, dA, _k, factor, dC, n);
+          cublasFree(dA);
+          cublasFree(dB);
+
+          _koff += _k;
+          _k = k - _koff > _kmax ? _kmax : k - _koff;
+          factor = 1.0f;
+        }
       }
     }
+
+    cublasGetVector(_m*n, sizeof(float), dC, 1, C+(_moff*n), 1);
+    cublasFree(dC);
+
+    _moff += _m;
+    _m = m - _moff > _mmax ? _mmax : m - _moff;
   }
-
-  hC = (float*) calloc(m*n, sizeof(float));
-  cublasGetVector(m*n, sizeof(float), dC, 1, hC, 1);
-  cublasFree(dC);
-
-  for(i = 0; i < m; ++i)
-    for(j = 0; j < n; ++j)
-      C[i*n+j] = hC[j*m+i];
-  free(hC);  
 
   cublasShutdown();
 }
 
 int main(int argc, char** argv) {
+  struct timeval start, end; 
+  double elapsed;
+
   float *A, *B, *C;
   int i, m, n, k;
  
-  m = 1000;
-  n = 2;
+  m = 500;
+  n = 500;
   k = 400000;
   A = (float*)malloc(m*k*sizeof(float));
   B = (float*)malloc(k*n*sizeof(float));
-  C = (float*)malloc(m*n*sizeof(float));
+  C = (float*)calloc(m*n,sizeof(float));
 
   for(i = 0; i < m*k; ++i)
     A[i] = 1;
   for(i = 0; i < k*n; ++i)
     B[i] = 1;
 
-  // tk: trans(A)*A doesn't work if A isn't square
-  //     need to swap params inside routine, not here
-  //     maybe just go with full cblas-style inputs
+for(i=0;i<11;++i) {
+  gettimeofday(&start,NULL);
   cusumma(0,1,m,n,k,A,B,C);
-  printf("%f %f %f\n", C[0], C[1], C[2]);
+  gettimeofday(&end,NULL);
+
+  elapsed = ((end.tv_sec*1000000 + end.tv_usec) - (start.tv_sec*1000000 + start.tv_usec))/1000000.0;
+  printf("%f %f %f %f\n", C[0], C[m-1], C[m*(n-1)], C[m*n-1]);
+//  for(i = 0; i < m*m; ++i)
+//    printf("%f\n",C[i]);
+  printf("%f\n", elapsed);
+}
+
   free(A);
   free(B);
   free(C);
