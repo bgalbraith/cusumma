@@ -16,14 +16,14 @@ cusumma(unsigned int transA,
         float *C)
 {
   float *hA, *dA, *dB, *dC;
-  int i, j, diff, tm, tk, tp, tp_last, tmp1, tmp2;
+  int i, j, diff, tm, tk, tp, tp_last, tmp1, tmp2, _kmax, _mmax, _m, _moff, _k, _koff;
   char opA, opB;
   float factor;
-  unsigned int gpu_mem, _m, _mmax, _moff, _k, _kmax, _koff;
+  unsigned int gpu_mem, lda, ldb;
 
   cublasInit();
 
-  // get total free memory available to SUMMA
+  // get total free memory available to CUSUMMA
   cuMemGetInfo(&gpu_mem, NULL);
 
   // take 2MB off the top for CUBLAS working memory
@@ -40,20 +40,19 @@ cusumma(unsigned int transA,
     if(tp > 0)
       tp_last = tp;
     _mmax = ceil(1.0*m/++tm);
-    tmp1 = A == B ? gpu_mem - _mmax * _mmax : gpu_mem - n * _mmax;
-    tmp2 = A == B ? _mmax : n + _mmax;
+    tmp1 = gpu_mem - _mmax * (A == B ? _mmax : n);
+    tmp2 = _mmax + (A == B ? 0 : n);
     _kmax = tmp1 / tmp2; //(gpu_mem - n * _mmax)/(n + _mmax);
-    tk    = ceil(1.0*k/_kmax);
-    tp    = (A == A ? 1 : 2)*tm*tk + tm;
+    tk    = ceil(1.0*k / _kmax);
+    tp    = (A == B ? 1 : 2)*tm*tk + tm;
   } while(tp < 0 || tp < tp_last);
 
   _mmax = ceil(1.0*m/--tm);
   if(A == B) {
     _kmax = gpu_mem / _mmax - _mmax;
   } else {
-    _kmax = ( gpu_mem - _mmax * n ) / ( _mmax + n );
+    _kmax = (gpu_mem - _mmax*n )/(_mmax + n);
   }
- 
 //_mmax = 2;
 //_kmax = 2;
 
@@ -66,14 +65,14 @@ cusumma(unsigned int transA,
   while(_moff < m) {
     cublasAlloc(_m * n, sizeof(float), (void**)&dC);
     if(A == B) {  // op(A) * op(A)
-
       diff = gpu_mem - m*k - m*m;
-      // A can fit entirely on the device
       if((_m == m) && (diff > 0)) {
         cublasAlloc(m * k, sizeof(float), (void**)&dA);
         cublasSetVector(m * k, sizeof(float), A, 1, dA, 1);
-        
-        cublasSgemm(opA, opB, m, m, k, 1.0f, dA, k, dA, k, 0.0f, dC, m);
+
+        lda = transA ? m : k;
+        ldb = transB ? k : n;
+        cublasSgemm(opA, opB, n, m, k, 1.0f, dA, ldb, dA, lda, 0.0f, dC, n);
         cublasFree(dA);
 
       } else {
@@ -90,7 +89,9 @@ cusumma(unsigned int transA,
           cublasSetVector(_m * _k, sizeof(float), hA, 1, dA, 1);
           free(hA);
 
-          cublasSgemm(opA, opB, _m, _m, _k, 1.0f, dA, _k, dA, _k, factor, dC, _m);
+          lda = transA ? _m : _k;
+          ldb = transB ? _k : n;
+          cublasSgemm(opA, opB, n, _m, _k, 1.0f, dA, ldb, dA, lda, factor, dC, n);
           cublasFree(dA);
         
           _koff += _k;
@@ -100,7 +101,6 @@ cusumma(unsigned int transA,
       }
 
     } else { // op(A) * op(B)
-      cublasAlloc(_m * n, sizeof(float), (void**)&dC);
       diff = gpu_mem - (m*k + k*n + m*n);
       if((_m == m) && (diff > 0)) {
         cublasAlloc(m * k, sizeof(float), (void**)&dA);
@@ -109,7 +109,9 @@ cusumma(unsigned int transA,
         cublasAlloc(k * n, sizeof(float), (void**)&dB);
         cublasSetVector(k * n, sizeof(float), B, 1, dB, 1);
     
-        cublasSgemm(opA, opB, n, m, k, 1.0f, dB, n, dA, k, 0.0f, dC, m);
+        lda = transA ? m : k;
+        ldb = transB ? k : n;
+        cublasSgemm(opA, opB, n, m, k, 1.0f, dB, ldb, dA, lda, 0.0f, dC, n);
 
         cublasFree(dA);
         cublasFree(dB);
@@ -137,9 +139,10 @@ cusumma(unsigned int transA,
         cublasSetVector(_k * n, sizeof(float), hB, 1, dB, 1);
         free(hB);
 */
-          int ldb = transB ? _k : n;
+          lda = transA ? _m : _k;
+          ldb = transB ? _k : n;
           cublasSetVector(_k * n, sizeof(float), B+(n*_koff), 1, dB, 1);
-          cublasSgemm(opA, opB, n, _m, _k, 1.0f, dB, ldb, dA, _k, factor, dC, n);
+          cublasSgemm(opA, opB, n, _m, _k, 1.0f, dB, ldb, dA, lda, factor, dC, n);
           cublasFree(dA);
           cublasFree(dB);
 
@@ -159,7 +162,7 @@ cusumma(unsigned int transA,
 
   cublasShutdown();
 }
-
+/*
 int main(int argc, char** argv) {
   struct timeval start, end; 
   double elapsed;
@@ -167,27 +170,25 @@ int main(int argc, char** argv) {
   float *A, *B, *C;
   int i, m, n, k;
  
-  m = 500;
-  n = 500;
-  k = 400000;
+  m = 20000;
+  n = 20000;
+  k = 20000;
   A = (float*)malloc(m*k*sizeof(float));
   B = (float*)malloc(k*n*sizeof(float));
   C = (float*)calloc(m*n,sizeof(float));
 
   for(i = 0; i < m*k; ++i)
-    A[i] = 1;
+    A[i] = 1;// + (i%2);
   for(i = 0; i < k*n; ++i)
-    B[i] = 1;
+    B[i] = 1;// + (i%2);
 
 for(i=0;i<11;++i) {
   gettimeofday(&start,NULL);
-  cusumma(0,1,m,n,k,A,B,C);
+  cusumma(0,0,m,n,k,A,B,C);
   gettimeofday(&end,NULL);
 
   elapsed = ((end.tv_sec*1000000 + end.tv_usec) - (start.tv_sec*1000000 + start.tv_usec))/1000000.0;
   printf("%f %f %f %f\n", C[0], C[m-1], C[m*(n-1)], C[m*n-1]);
-//  for(i = 0; i < m*m; ++i)
-//    printf("%f\n",C[i]);
   printf("%f\n", elapsed);
 }
 
@@ -195,3 +196,4 @@ for(i=0;i<11;++i) {
   free(B);
   free(C);
 }
+*/
