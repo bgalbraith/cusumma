@@ -1,0 +1,14 @@
+This is the source code for the CUSUMMA implementation. It is provided without warranty of any kind.
+
+Notes:
+This is still very much under development, so there are some rough spots. Most notably is the lack 
+of makefile, which will be added soon. For now this code simply be dropped into an existing project
+and incorporated, requireing only that the CUBLAS library is included in the call to nvcc (-lcublas).
+
+Future Work:
+- Flesh out documentation
+- Add support for double and complex data types
+- Implement multi-GPU aware version
+
+Cheers,
+Byron
