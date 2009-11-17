@@ -1,3 +1,12 @@
+/*
+** cusumma.cu
+**
+** Resource-aware dense matrix multiplication using GPUs
+**
+** Provided as is with no warranty of any kind.
+** Byron Galbraith (c) 2009
+*/
+
 #include <cuda.h>
 #include <cublas.h>
 #include <math.h>
@@ -53,8 +62,6 @@ cusumma(unsigned int transA,
   } else {
     _kmax = (gpu_mem - _mmax*n )/(_mmax + n);
   }
-//_mmax = 2;
-//_kmax = 2;
 
   // assumes input matrices are in row-major order
   opA = transB ? 't' : 'n';
@@ -162,38 +169,3 @@ cusumma(unsigned int transA,
 
   cublasShutdown();
 }
-/*
-int main(int argc, char** argv) {
-  struct timeval start, end; 
-  double elapsed;
-
-  float *A, *B, *C;
-  int i, m, n, k;
- 
-  m = 20000;
-  n = 20000;
-  k = 20000;
-  A = (float*)malloc(m*k*sizeof(float));
-  B = (float*)malloc(k*n*sizeof(float));
-  C = (float*)calloc(m*n,sizeof(float));
-
-  for(i = 0; i < m*k; ++i)
-    A[i] = 1;// + (i%2);
-  for(i = 0; i < k*n; ++i)
-    B[i] = 1;// + (i%2);
-
-for(i=0;i<11;++i) {
-  gettimeofday(&start,NULL);
-  cusumma(0,0,m,n,k,A,B,C);
-  gettimeofday(&end,NULL);
-
-  elapsed = ((end.tv_sec*1000000 + end.tv_usec) - (start.tv_sec*1000000 + start.tv_usec))/1000000.0;
-  printf("%f %f %f %f\n", C[0], C[m-1], C[m*(n-1)], C[m*n-1]);
-  printf("%f\n", elapsed);
-}
-
-  free(A);
-  free(B);
-  free(C);
-}
-*/
